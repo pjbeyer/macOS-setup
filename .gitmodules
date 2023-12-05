@@ -1,0 +1,4 @@
+[submodule "mths.be.macos"]
+	path = mths.be.macos
+	url = git@github.com:pjbeyer/mths.be.macos.git
+	ignore = dirty
