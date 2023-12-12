@@ -1,0 +1,10 @@
+sensitiveCodepaths:
+  # Files only allowed authors can modify
+  - 'setup*'
+allowedAuthors:
+  usernames:
+    # GitHub username
+    - 'pjbeyer'
+notificationList:
+  # GitHub username or team name
+  - '@pjbeyer'
