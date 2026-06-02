@@ -10,11 +10,239 @@
 # Possible values (excluded if boolean)
 # Takes effect (excluded if immediate)
 
+# Callback functions are invoked indirectly through for_each_setting.
+# shellcheck disable=SC2329
+
+MODE=""
+SECTION_FILTER=""
+SETTING_SEP=$(printf '\037')
+SETTINGS=()
+CHECK_FAILED=0
+
+usage() {
+  cat <<'EOF'
+Usage: macos-setup [MODE] [OPTIONS]
+
+Modes:
+  --list              List configured settings without reading or writing macOS preferences.
+  --dry-run           Show commands that would be applied, without writing preferences.
+  --check             Compare current macOS preferences to desired values, without writing.
+  --apply             Apply desired macOS preferences.
+
+Options:
+  --section NAME      Limit mode to a section, e.g. screen, safari, terminal, software-update.
+  -h, --help          Show this help text.
+
+Safety:
+  Only --apply mutates macOS preferences. Read-only modes do not quit System Settings.
+EOF
+}
+
+parse_args() {
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --list|--dry-run|--check|--apply)
+        if [ -n "$MODE" ]; then
+          printf 'error: only one mode may be specified\n' >&2
+          exit 2
+        fi
+        MODE="${1#--}"
+        ;;
+      --section)
+        shift
+        if [ "$#" -eq 0 ]; then
+          printf 'error: --section requires a value\n' >&2
+          exit 2
+        fi
+        SECTION_FILTER=$1
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        printf 'error: unknown argument: %s\n' "$1" >&2
+        usage >&2
+        exit 2
+        ;;
+    esac
+    shift
+  done
+
+  if [ -z "$MODE" ]; then
+    usage >&2
+    printf '\nerror: choose an explicit mode; use --apply to write settings\n' >&2
+    exit 2
+  fi
+}
+
+setting() {
+  SETTINGS[${#SETTINGS[@]}]="$1$SETTING_SEP$2$SETTING_SEP$3$SETTING_SEP$4$SETTING_SEP$5$SETTING_SEP$6$SETTING_SEP$7"
+}
+
+declare_settings() {
+  setting "screen" "Require password after sleep or screen saver begins" "com.apple.screensaver" "askForPassword" "int" "1" "none"
+  setting "screen" "Require password immediately after sleep or screen saver begins" "com.apple.screensaver" "askForPasswordDelay" "int" "0" "none"
+  setting "safari" "Warn about fraudulent websites" "com.apple.Safari" "WarnAboutFraudulentWebsites" "bool" "true" "Safari"
+  setting "safari" "Disable Java in Safari WebKit" "com.apple.Safari" "WebKitJavaEnabled" "bool" "false" "Safari"
+  setting "safari" "Disable Java in Safari WebKit2 content pages" "com.apple.Safari" "com.apple.Safari.ContentPageGroupIdentifier.WebKit2JavaEnabled" "bool" "false" "Safari"
+  setting "safari" "Disable Java for local files in Safari WebKit2" "com.apple.Safari" "com.apple.Safari.ContentPageGroupIdentifier.WebKit2JavaEnabledForLocalFiles" "bool" "false" "Safari"
+  setting "safari" "Send Do Not Track HTTP header" "com.apple.Safari" "SendDoNotTrackHTTPHeader" "bool" "true" "Safari"
+  setting "safari" "Install Safari extension updates automatically" "com.apple.Safari" "InstallExtensionUpdatesAutomatically" "bool" "true" "Safari"
+  setting "terminal" "Enable Secure Keyboard Entry in Terminal" "com.apple.terminal" "SecureKeyboardEntry" "bool" "true" "Terminal"
+  setting "software-update" "Enable automatic software update checks" "com.apple.SoftwareUpdate" "AutomaticCheckEnabled" "bool" "true" "none"
+  setting "software-update" "Check for software updates daily" "com.apple.SoftwareUpdate" "ScheduleFrequency" "int" "1" "none"
+  setting "software-update" "Download newly available updates in background" "com.apple.SoftwareUpdate" "AutomaticDownload" "int" "1" "none"
+  setting "software-update" "Install system data files and security updates" "com.apple.SoftwareUpdate" "CriticalUpdateInstall" "int" "1" "none"
+  setting "software-update" "Turn on App Store app auto-update" "com.apple.commerce" "AutoUpdate" "bool" "true" "none"
+}
+
+for_each_setting() {
+  local row section label domain key type value restart failed
+  failed=0
+  for row in "${SETTINGS[@]}"; do
+    IFS=$SETTING_SEP read -r section label domain key type value restart <<EOF
+$row
+EOF
+    if [ -n "$SECTION_FILTER" ] && [ "$SECTION_FILTER" != "$section" ]; then
+      continue
+    fi
+    "$@" "$section" "$label" "$domain" "$key" "$type" "$value" "$restart" || failed=1
+  done
+  return "$failed"
+}
+
+list_setting() {
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5" "$6" "$7"
+}
+
+render_defaults_write() {
+  local domain key type value
+  domain=$1
+  key=$2
+  type=$3
+  value=$4
+  case "$type" in
+    bool) printf 'defaults write %s %s -bool %s\n' "$domain" "$key" "$value" ;;
+    int) printf 'defaults write %s %s -int %s\n' "$domain" "$key" "$value" ;;
+    float) printf 'defaults write %s %s -float %s\n' "$domain" "$key" "$value" ;;
+    string) printf 'defaults write %s %s -string %s\n' "$domain" "$key" "$value" ;;
+    *) printf 'error: unsupported type: %s\n' "$type" >&2; return 1 ;;
+  esac
+}
+
+dry_run_setting() {
+  shift 2
+  render_defaults_write "$1" "$2" "$3" "$4"
+}
+
+read_default() {
+  defaults read "$1" "$2" 2>/dev/null
+}
+
+normalize_value() {
+  local type raw
+  type=$1
+  raw=$2
+  case "$type" in
+    bool)
+      case "$raw" in
+        1|true|TRUE|True|YES|Yes|yes) printf 'true' ;;
+        0|false|FALSE|False|NO|No|no) printf 'false' ;;
+        *) printf '%s' "$raw" ;;
+      esac
+      ;;
+    int|float|string) printf '%s' "$raw" ;;
+    *) printf '%s' "$raw" ;;
+  esac
+}
+
+check_setting() {
+  local section label domain key type expected raw actual expected_norm
+  section=$1
+  label=$2
+  domain=$3
+  key=$4
+  type=$5
+  expected=$6
+
+  raw=$(read_default "$domain" "$key") || {
+    printf 'MISSING\t%s\t%s\t%s\texpected=%s\t%s\n' "$section" "$domain" "$key" "$expected" "$label"
+    CHECK_FAILED=1
+    return 0
+  }
+
+  actual=$(normalize_value "$type" "$raw")
+  expected_norm=$(normalize_value "$type" "$expected")
+  if [ "$actual" = "$expected_norm" ]; then
+    printf 'PASS\t%s\t%s\t%s\t%s\t%s\n' "$section" "$domain" "$key" "$actual" "$label"
+  else
+    printf 'FAIL\t%s\t%s\t%s\texpected=%s\tactual=%s\t%s\n' "$section" "$domain" "$key" "$expected_norm" "$actual" "$label"
+    CHECK_FAILED=1
+  fi
+}
+
+apply_setting() {
+  local section label domain key type value
+  section=$1
+  label=$2
+  domain=$3
+  key=$4
+  type=$5
+  value=$6
+
+  printf 'Applying [%s] %s...\n' "$section" "$label"
+  case "$type" in
+    bool) defaults write "$domain" "$key" -bool "$value" ;;
+    int) defaults write "$domain" "$key" -int "$value" ;;
+    float) defaults write "$domain" "$key" -float "$value" ;;
+    string) defaults write "$domain" "$key" -string "$value" ;;
+    *) printf 'error: unsupported type: %s\n' "$type" >&2; return 1 ;;
+  esac
+}
+
+quit_system_settings() {
+  osascript -e 'tell application "System Preferences" to quit' 2>/dev/null || true
+  osascript -e 'tell application "System Settings" to quit' 2>/dev/null || true
+}
+
+main() {
+  parse_args "$@"
+  declare_settings
+
+  case "$MODE" in
+    list)
+      for_each_setting list_setting
+      ;;
+    dry-run)
+      for_each_setting dry_run_setting
+      ;;
+    check)
+      CHECK_FAILED=0
+      for_each_setting check_setting
+      return "$CHECK_FAILED"
+      ;;
+    apply)
+      quit_system_settings
+      for_each_setting apply_setting
+      printf 'Done. Note that some of these changes require a logout/restart to take effect.\n'
+      ;;
+    *)
+      printf 'error: unsupported mode: %s\n' "$MODE" >&2
+      return 2
+      ;;
+  esac
+}
+
+main "$@"
+exit $?
+
+# Legacy setting notes below are retained as documentation. Active writes are dispatched above.
 # Close any open _System Preferences_ or _System Settings_ panes, to prevent
 # them from overriding settings we’re about to change.
 # [December 2023 note] "System Preferences" and "System Settings" are
 # interchangeable here.
-osascript -e 'tell application "System Preferences" to quit'
+# osascript -e 'tell application "System Preferences" to quit'
 
 # Ask for the administrator password upfront
 #sudo -v
@@ -239,8 +467,8 @@ osascript -e 'tell application "System Preferences" to quit'
 ###############################################################################
 
 # Require password immediately after sleep or screen saver begins
-defaults write com.apple.screensaver askForPassword -int 1
-defaults write com.apple.screensaver askForPasswordDelay -int 0
+# defaults write com.apple.screensaver askForPassword -int 1
+# defaults write com.apple.screensaver askForPasswordDelay -int 0
 
 # Save screenshots to the desktop
 #defaults write com.apple.screencapture location -string "${HOME}/Desktop"
@@ -546,16 +774,16 @@ defaults write com.apple.screensaver askForPasswordDelay -int 0
 #defaults write com.apple.Safari AutoFillMiscellaneousForms -bool false
 
 # Warn about fraudulent websites
-defaults write com.apple.Safari WarnAboutFraudulentWebsites -bool true
+# defaults write com.apple.Safari WarnAboutFraudulentWebsites -bool true
 
 # Disable plug-ins
 #defaults write com.apple.Safari WebKitPluginsEnabled -bool false
 #defaults write com.apple.Safari com.apple.Safari.ContentPageGroupIdentifier.WebKit2PluginsEnabled -bool false
 
 # Disable Java
-defaults write com.apple.Safari WebKitJavaEnabled -bool false
-defaults write com.apple.Safari com.apple.Safari.ContentPageGroupIdentifier.WebKit2JavaEnabled -bool false
-defaults write com.apple.Safari com.apple.Safari.ContentPageGroupIdentifier.WebKit2JavaEnabledForLocalFiles -bool false
+# defaults write com.apple.Safari WebKitJavaEnabled -bool false
+# defaults write com.apple.Safari com.apple.Safari.ContentPageGroupIdentifier.WebKit2JavaEnabled -bool false
+# defaults write com.apple.Safari com.apple.Safari.ContentPageGroupIdentifier.WebKit2JavaEnabledForLocalFiles -bool false
 
 # Block pop-up windows
 #defaults write com.apple.Safari WebKitJavaScriptCanOpenWindowsAutomatically -bool false
@@ -568,10 +796,10 @@ defaults write com.apple.Safari com.apple.Safari.ContentPageGroupIdentifier.WebK
 #defaults write com.apple.SafariTechnologyPreview com.apple.Safari.ContentPageGroupIdentifier.WebKit2AllowsInlineMediaPlayback -bool false
 
 # Enable “Do Not Track”
-defaults write com.apple.Safari SendDoNotTrackHTTPHeader -bool true
+# defaults write com.apple.Safari SendDoNotTrackHTTPHeader -bool true
 
 # Update extensions automatically
-defaults write com.apple.Safari InstallExtensionUpdatesAutomatically -bool true
+# defaults write com.apple.Safari InstallExtensionUpdatesAutomatically -bool true
 
 ###############################################################################
 # Mail                                                                        #
@@ -709,7 +937,7 @@ defaults write com.apple.Safari InstallExtensionUpdatesAutomatically -bool true
 
 # Enable Secure Keyboard Entry in Terminal.app
 # See: https://security.stackexchange.com/a/47786/8918
-defaults write com.apple.terminal SecureKeyboardEntry -bool true
+# defaults write com.apple.terminal SecureKeyboardEntry -bool true
 
 # Disable the annoying line marks
 #defaults write com.apple.Terminal ShowLineMarks -int 0
@@ -778,22 +1006,22 @@ defaults write com.apple.terminal SecureKeyboardEntry -bool true
 #defaults write com.apple.appstore ShowDebugMenu -bool true
 
 # Enable the automatic update check
-defaults write com.apple.SoftwareUpdate AutomaticCheckEnabled -bool true
+# defaults write com.apple.SoftwareUpdate AutomaticCheckEnabled -bool true
 
 # Check for software updates daily, not just once per week
-defaults write com.apple.SoftwareUpdate ScheduleFrequency -int 1
+# defaults write com.apple.SoftwareUpdate ScheduleFrequency -int 1
 
 # Download newly available updates in background
-defaults write com.apple.SoftwareUpdate AutomaticDownload -int 1
+# defaults write com.apple.SoftwareUpdate AutomaticDownload -int 1
 
 # Install System data files & security updates
-defaults write com.apple.SoftwareUpdate CriticalUpdateInstall -int 1
+# defaults write com.apple.SoftwareUpdate CriticalUpdateInstall -int 1
 
 # Automatically download apps purchased on other Macs
 #defaults write com.apple.SoftwareUpdate ConfigDataInstall -int 1
 
 # Turn on app auto-update
-defaults write com.apple.commerce AutoUpdate -bool true
+# defaults write com.apple.commerce AutoUpdate -bool true
 
 # Allow the App Store to reboot machine on macOS updates
 #defaults write com.apple.commerce AutoUpdateRestartRequired -bool true
@@ -848,4 +1076,4 @@ defaults write com.apple.commerce AutoUpdate -bool true
 #	killall "${app}" &> /dev/null
 #done
 
-echo "Done. Note that some of these changes require a logout/restart to take effect."
+# echo "Done. Note that some of these changes require a logout/restart to take effect."

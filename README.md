@@ -9,11 +9,31 @@ When setting up a new Mac, you should set some sensible macOS defaults.
 Usage
 -----
 
-> Note: The script is idempotent: it can safely be run multiple times.
+> Note: The apply mode is idempotent: it can safely be run multiple times.
+
+Inspect configured settings without changing macOS preferences:
 
 ```bash
-./macos-setup
+./macos-setup --help
+./macos-setup --list
+./macos-setup --dry-run
+./macos-setup --check
 ```
+
+Limit a mode to one section:
+
+```bash
+./macos-setup --section screen --check
+./macos-setup --section safari --dry-run
+```
+
+Apply desired settings explicitly:
+
+```bash
+./macos-setup --apply
+```
+
+Safety: only `--apply` writes preferences or quits System Settings/System Preferences. Running without a mode exits with an error instead of applying changes.
 
 Compatibility
 -------------
