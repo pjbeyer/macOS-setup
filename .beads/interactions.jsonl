@@ -1,2 +1,3 @@
 {"id":"int-57519ede","kind":"field_change","created_at":"2026-06-02T01:30:54.417334Z","actor":"Phil Beyer","issue_id":"macos-q69","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Implementation plan written and follow-up Beads issues created"}}
 {"id":"int-9c206b4c","kind":"field_change","created_at":"2026-06-02T01:45:30.161054Z","actor":"Phil Beyer","issue_id":"macos-5ge","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Completed"}}
+{"id":"int-5cbff42d","kind":"field_change","created_at":"2026-06-02T01:48:01.181389Z","actor":"Phil Beyer","issue_id":"macos-t69","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Completed"}}
