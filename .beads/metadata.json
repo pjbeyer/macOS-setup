@@ -1,8 +1,8 @@
 {
   "database": "dolt",
   "backend": "dolt",
-  "dolt_mode": "embedded",
-  "dolt_database": "macos",
-  "project_id": "208371a6-4e2a-491a-8ac5-3ee5acf571a3",
-  "last_bd_version": "1.1.0"
+  "dolt_mode": "server",
+  "dolt_server_port": 3307,
+  "dolt_database": "macOS_setup",
+  "project_id": "208371a6-4e2a-491a-8ac5-3ee5acf571a3"
 }
