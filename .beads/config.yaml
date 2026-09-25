@@ -57,3 +57,4 @@
 sync.remote: "git+https://github.com/pjbeyer/macOS-setup.git"
 dolt:
     port: 3307
+    auto-push: false
